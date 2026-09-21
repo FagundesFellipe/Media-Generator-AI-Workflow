@@ -1,0 +1,250 @@
+flowchart TD
+
+    %% =========================================================================
+    %% Media Generator AI Workflow — grafo de geração (v1)
+    %% Este é o blueprint de construção. Leia a LEGENDA e o GLOSSÁRIO primeiro.
+    %% Detalhes de implementação e regras do LangGraph: docs/LANGGRAPH_NODES_V1.md
+    %% Arquitetura geral: docs/ARCHITECTURE.md
+    %% ----
+    %% REGRA CENTRAL DESTE DESENHO
+    %% Toda wave entra NOS TRÊS subgrafos de plataforma (YouTube, LinkedIn, X).
+    %% Quem não tem trabalho naquela wave sai na hora por um nó [NO-OP].
+    %% Isso é obrigatório: o review só abre quando os três terminam.
+    %% Sem isso, corrigir um item só do LinkedIn travaria o grafo para sempre.
+    %% ----
+    %% O nome em inglês que aparece no topo de cada nó é o nome exato da função
+    %% no código. Ele também é a linha correspondente na tabela `steps` do banco.
+    %% =========================================================================
+
+    %% ======================= LEGENDA =======================
+    subgraph LEG["📖 LEGENDA — como ler o desenho"]
+        direction TB
+
+        LEG_SETA["<b>Setas</b><br/>➡️ ——&gt; fluxo normal e ramos em paralelo<br/>⏳ ══&gt; sincronização: espera TODOS os ramos terminarem<br/>🔄 ─ ─&gt; ciclo de correção: refaz só o que foi rejeitado"]
+
+        LEG_FORMA["<b>Formas</b><br/>▭ retângulo = etapa executável<br/>◇ losango = decisão<br/>▱ paralelogramo = o grafo para e espera você<br/>🛢️ cilindro = gravação no banco de dados<br/>⬭ estádio = início ou fim"]
+
+        LEG_ETIQ["<b>Etiquetas coloridas (o que o nó faz)</b><br/>🧠 [LLM] azul = uma chamada de modelo de texto barato<br/>🎨 [IMG] rosa = geração de imagem (custa mais caro)<br/>🙋 [HITL] amarelo = o grafo para e espera a sua decisão<br/>🔧 [FERR] roxo = usa ferramenta externa (busca ou navegador)<br/>💾 [MEM] verde = grava no Postgres<br/>⏭️ [NO-OP] cinza = não faz nada, só destrava o caminho<br/>⏳ [SYNC] laranja = espera ramos que rodam em paralelo<br/>As etiquetas podem se combinar, ex.: 🧠+🎨"]
+    end
+
+    %% ======================= GLOSSÁRIO =======================
+    subgraph GLO["📚 GLOSSÁRIO — termos usados no desenho"]
+        direction TB
+
+        G_CONTEXTO["<b>📦 Contexto</b><br/><b>ContentBrief</b> — resumo estruturado extraído do seu arquivo<br/><b>ContextPack</b> — recorte de contexto que um agente recebe<br/><b>allowlist</b> — lista do que um agente PODE ver; o resto não entra"]
+
+        G_EXECUCAO["<b>⚙️ Execução</b><br/><b>wave</b> — uma passada completa pelo grafo<br/><b>fresh</b> — wave que gera tudo do zero<br/><b>regen</b> — wave que refaz só os itens rejeitados<br/><b>no-op</b> — nó que não faz nada, só destrava o caminho<br/><b>subgrafo</b> — grafo menor que o pai enxerga como se fosse 1 nó"]
+
+        G_MEMORIA["<b>💾 Memória</b><br/><b>stale</b> — pesquisa vencida (mais de 14 dias)<br/><b>contested</b> — regra questionada; sai do contexto até ser resolvida<br/><b>ativa</b> — regra aprovada e valendo<br/><b>memória episódica</b> — seus feedbacks de revisões anteriores"]
+
+        G_HUMANO["<b>🙋 Humano e observabilidade</b><br/><b>HITL</b> — o grafo para e espera você<br/><b>interrupt()</b> — comando do LangGraph que pausa o grafo<br/><b>@traced</b> — grava tokens, custo e latência de cada nó<br/><b>code_blocks</b> — trechos de código do seu arquivo, guardados sem reescrita"]
+    end
+
+    %% ======================= 1. ENTRADA =======================
+    START([🟢 INÍCIO]) --> INGEST
+
+    INGEST["<b>1. ingest_context</b><br/>🧠 [LLM]<br/>lê o seu arquivo e extrai o ContentBrief"]
+
+    INGEST --> MEMLOAD
+
+    MEMLOAD["<b>2. memory_loader</b><br/>💾 [MEM]<br/>monta o ContextPack de cada agente:<br/>regras ativas, público-alvo, pesquisa e casos anteriores"]
+
+    MEMLOAD --> NEEDS
+
+    NEEDS{"<b>3. Precisa de pesquisa nova?</b><br/>🔎 pesquisa vencida há mais de 14 dias<br/>ou existe regra contestada?"}
+
+    NEEDS -->|não| DISPATCH
+    NEEDS -->|sim| RG
+
+    %% ======================= 4. PESQUISA WEB =======================
+    subgraph RG["<b>4. research_graph</b> 🔎 — pesquisa web (subgrafo)"]
+        direction TB
+
+        R_ENTRY["<b>r_entry</b><br/>⏭️ [NO-OP]<br/>marca quais plataformas precisam de pesquisa"]
+
+        R_ENTRY --> R_YT
+        R_ENTRY --> R_LI
+        R_ENTRY --> R_X
+
+        R_YT["<b>pesquisa_youtube</b><br/>🔧 [FERR]<br/>Tavily busca, Firecrawl lê as páginas<br/>pula se o YouTube não for alvo"]
+        R_LI["<b>pesquisa_linkedin</b><br/>🔧 [FERR]<br/>Tavily busca, Firecrawl lê as páginas<br/>pula se o LinkedIn não for alvo"]
+        R_X["<b>pesquisa_x</b><br/>🔧 [FERR]<br/>Tavily busca, Firecrawl lê as páginas<br/>pula se o X não for alvo"]
+
+        R_YT ==> R_SYN
+        R_LI ==> R_SYN
+        R_X ==> R_SYN
+
+        R_SYN["<b>r_synth</b><br/>⏳ [SYNC] + 🧠 [LLM]<br/>junta os achados das 3, com fonte e data"]
+
+        R_SYN --> R_WRITE[("<b>grava a pesquisa</b><br/>💾 [MEM]<br/>vale por 14 dias")]
+    end
+
+    RG -->|subgrafo devolve o controle| DISPATCH
+
+    %% ======================= 5. ABERTURA DA WAVE =======================
+    DISPATCH["<b>5. platform_dispatch</b><br/>⏭️ [NO-OP]<br/>abre uma wave de geração nova"]
+
+    DISPATCH --> YTG
+    DISPATCH --> LIG
+    DISPATCH --> XG
+
+    %% ======================= 6. YOUTUBE =======================
+    subgraph YTG["<b>6. yt_graph</b> 📺 — YouTube (subgrafo · só existe quando a entrada é transcrição)"]
+        direction TB
+
+        YT_ENTRY{"<b>yt_entry</b><br/>tenho trabalho nesta wave?"}
+
+        YT_ENTRY -->|não: fora do alvo| YT_EXIT
+        YT_ENTRY -->|sim: wave nova| YT_FAN
+        YT_ENTRY -->|sim: refazer os títulos| YT_T
+        YT_ENTRY -->|sim: refazer a descrição| YT_S
+        YT_ENTRY -->|sim: refazer a thumbnail| YT_C
+
+        YT_FAN["<b>yt_fanout</b><br/>⏭️ [NO-OP]<br/>dispara os 3 em paralelo"]
+
+        YT_FAN --> YT_T
+        YT_FAN --> YT_S
+        YT_FAN --> YT_C
+
+        YT_T["<b>yt_title_agent</b><br/>🧠 [LLM]<br/>3 títulos com ângulos diferentes"]
+        YT_S["<b>yt_seo_agent</b><br/>🧠 [LLM]<br/>descrição para SEO + 15 hashtags"]
+        YT_C["<b>yt_thumb_concept_agent</b><br/>🧠 [LLM]<br/>2 ideias de thumbnail 16:9<br/>e se cada uma exige rosto (needs_face)"]
+
+        YT_T --> YT_NEXT
+        YT_S --> YT_NEXT
+
+        YT_C --> YT_FACE
+
+        YT_FACE{"alguma ideia exige rosto<br/>e ainda não há foto?"}
+        YT_FACE -->|sim| YT_HITL
+        YT_FACE -->|não| YT_G
+
+        YT_HITL[/"<b>envie foto ou frame</b><br/>🙋 [HITL]<br/>+ confirmação de consentimento"/]
+
+        YT_HITL --> YT_G
+
+        YT_G["<b>yt_thumb_gen</b><br/>🎨 [IMG]<br/>gera 2 thumbnails 16:9"]
+
+        YT_G --> YT_NEXT
+
+        YT_NEXT{"esta wave é nova?"}
+        YT_NEXT -->|sim: sincroniza| YT_JOIN
+        YT_NEXT -->|não: já acabou| YT_EXIT
+
+        YT_JOIN["<b>yt_join</b><br/>⏳ [SYNC]<br/>espera os 3 terminarem, inclusive<br/>depois da pausa para a foto"]
+
+        YT_JOIN --> YT_EXIT
+
+        YT_EXIT["<b>yt_exit</b><br/>⏭️ [NO-OP]"]
+        YT_EXIT --> YT_END([🏁 FIM do subgrafo])
+    end
+
+    %% ======================= 7. LINKEDIN =======================
+    subgraph LIG["<b>7. li_graph</b> 💼 — LinkedIn (subgrafo)"]
+        direction TB
+
+        LI_ENTRY{"<b>li_entry</b><br/>tenho trabalho nesta wave?"}
+
+        LI_ENTRY -->|não: fora do alvo| LI_EXIT
+        LI_ENTRY -->|sim: wave nova| LI_ST
+        LI_ENTRY -->|sim: refazer o formato| LI_ST
+        LI_ENTRY -->|sim: refazer o post| LI_P
+        LI_ENTRY -->|sim: refazer o artigo| LI_A
+        LI_ENTRY -->|sim: refazer o carrossel| LI_C
+
+        LI_ST["<b>li_strategist_agent</b><br/>🧠 [LLM]<br/>recomenda o formato e justifica"]
+
+        LI_ST --> LI_HITL
+
+        LI_HITL[/"<b>aprove ou troque o formato</b><br/>🙋 [HITL]"/]
+
+        LI_HITL --> LI_R
+
+        LI_R{"formato escolhido"}
+
+        LI_R -->|post| LI_P["<b>li_post_agent</b><br/>🧠 [LLM]<br/>copy + hashtags"]
+        LI_R -->|artigo| LI_A["<b>li_article_agent</b><br/>🧠 [LLM] + 🎨 [IMG]<br/>artigo + imagem de capa"]
+        LI_R -->|carrossel| LI_C["<b>li_carousel_agent</b><br/>🧠 [LLM] + 🔧 [FERR]<br/>monta os slides em HTML e o Playwright<br/>transforma em PNG. Os code_blocks entram<br/>originais, o modelo nunca reescreve o código"]
+
+        LI_P --> LI_EXIT
+        LI_A --> LI_EXIT
+        LI_C --> LI_EXIT
+
+        LI_EXIT["<b>li_exit</b><br/>⏭️ [NO-OP]"]
+        LI_EXIT --> LI_END([🏁 FIM do subgrafo])
+    end
+
+    %% ======================= 8. X =======================
+    subgraph XG["<b>8. x_graph</b> 🐦 — X (subgrafo)"]
+        direction TB
+
+        X_ENTRY{"<b>x_entry</b><br/>tenho trabalho nesta wave?"}
+
+        X_ENTRY -->|não: fora do alvo| X_EXIT
+        X_ENTRY -->|sim: wave nova| X_ST
+        X_ENTRY -->|sim: refazer o formato| X_ST
+        X_ENTRY -->|sim: refazer o post ou thread| X_W
+        X_ENTRY -->|sim: refazer o visual| X_V
+
+        X_ST["<b>x_strategist_agent</b><br/>🧠 [LLM]<br/>recomenda o formato, justifica<br/>e escolhe o CTA para YouTube ou LinkedIn"]
+
+        X_ST --> X_HITL
+
+        X_HITL[/"<b>aprove ou troque o formato</b><br/>🙋 [HITL]"/]
+
+        X_HITL --> X_R
+
+        X_R{"formato escolhido"}
+
+        X_R -->|post ou thread| X_W["<b>x_writer_agent</b><br/>🧠 [LLM]<br/>texto + CTA"]
+        X_R -->|visual| X_V["<b>x_visual_agent</b><br/>🧠 [LLM] + 🎨 [IMG]<br/>copy + imagem, ou Playwright<br/>quando o visual contém código"]
+
+        X_W --> X_EXIT
+        X_V --> X_EXIT
+
+        X_EXIT["<b>x_exit</b><br/>⏭️ [NO-OP]"]
+        X_EXIT --> X_END([🏁 FIM do subgrafo])
+    end
+
+    %% ======================= 9. REVIEW =======================
+    YTG ==>|sincronização: espera os 3 subgrafos| REVIEW
+    LIG ==> REVIEW
+    XG ==> REVIEW
+
+    REVIEW[/"<b>9. REVIEW DO PACOTE</b><br/>🙋 [HITL]<br/>aprova ou rejeita item por item<br/>e escreve o motivo em texto livre"/]
+
+    REVIEW --> REVIEW_OK
+
+    REVIEW_OK{"<b>10. Tudo aprovado?</b>"}
+
+    REVIEW_OK -->|não| REGEN
+    REVIEW_OK -->|sim| FINAL
+
+    REGEN["<b>11. regen_dispatch</b><br/>⏭️ [NO-OP]<br/>marca quais itens refazer<br/>e leva junto o seu feedback"]
+
+    REGEN -->|abre uma wave de correção| YTG
+    REGEN -->|abre uma wave de correção| LIG
+    REGEN -->|abre uma wave de correção| XG
+
+    FINAL["<b>12. finalize</b><br/>💾 [MEM]<br/>grava as versões aprovadas e os arquivos gerados"]
+
+    FINAL --> EP[("<b>grava a memória episódica</b><br/>💾 [MEM]<br/>cada artefato + o seu feedback de revisão")]
+
+    EP --> ENDG([🏁 FIM])
+
+    %% ======================= ESTILOS =======================
+    classDef hitl fill:#ffe9b3,stroke:#c98a00,color:#000
+    classDef llm fill:#e3f2fd,stroke:#1565c0,color:#000
+    classDef img fill:#fce4ec,stroke:#c2185b,color:#000
+    classDef mem fill:#e8f5e9,stroke:#2e7d32,color:#000
+    classDef ferr fill:#f3e5f5,stroke:#6a1b9a,color:#000
+    classDef sync fill:#fff3e0,stroke:#e65100,color:#000
+    classDef noop fill:#f5f5f5,stroke:#9e9e9e,color:#000
+
+    class YT_HITL,LI_HITL,X_HITL,REVIEW hitl
+    class INGEST,LI_ST,X_ST,LI_P,X_W,R_SYN llm
+    class YT_G,LI_A,X_V img
+    class MEMLOAD,R_WRITE,FINAL,EP mem
+    class R_YT,R_LI,R_X,LI_C ferr
+    class YT_JOIN sync
+    class R_ENTRY,DISPATCH,REGEN,YT_FAN,YT_EXIT,LI_EXIT,X_EXIT noop
