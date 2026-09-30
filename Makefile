@@ -68,3 +68,18 @@ test-v: ## Run tests with verbose output
 
 test-s: ## Run tests with added print() logs
 	uv run pytest -v -s
+
+
+##@ Prompt Manager — Frontend
+# Web interface (Flask + Tailwind CSS) to manage prompts with semantic versioning.
+#
+# Prerequisite: the PROMPT_DIR variable must be set in the .env file
+# or exported in the environment. Example:
+#
+#   echo 'PROMPT_DIR=./data/prompts' >> .env
+#
+# Usage:
+#   make prompt-manager-serve          # Starts the server at http://127.0.0.1:5000
+
+prompt-manager-serve: ## Starts the prompts manager Flask server
+	PYTHONPATH=src uv run python -m prompts_manager.backend.__main__
